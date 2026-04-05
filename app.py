@@ -107,10 +107,6 @@ with col2:
 
 ready = True
 
-if not st.session_state.api_key:
-    st.info("👈 Introduce tu API Key en la barra lateral para continuar.")
-    ready = False
-
 if not essay_types:
     st.error("❌ No se encontraron tipos de redacción. Comprueba la carpeta `redacciones/`.")
     ready = False
