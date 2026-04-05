@@ -14,7 +14,6 @@ from corrector_cambridge_v5 import (
     CambridgeCorrector,
     process_excel,
     get_essay_types,
-    init_client,
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -69,21 +68,16 @@ st.caption("Corrección automática de redacciones C1/C2 · Powered by Llama 3.3
 st.markdown("---")
 
 # ─────────────────────────────────────────────────────────────
-# INICIALIZACIÓN DE MOTOR (SILENCIOSA)
-# ─────────────────────────────────────────────────────────────
-try:
-    # Lee la clave oculta en la configuración de Streamlit Cloud (Advanced Settings -> Secrets)
-    secret_key = st.secrets["LLAMA_API_KEY"]
-    init_client(secret_key)
-except KeyError:
-    st.error("Error de servidor: Credenciales de IA no configuradas. Contacta al administrador.")
-    st.stop()
-
-# ─────────────────────────────────────────────────────────────
 # FORMULARIO PRINCIPAL
 # ─────────────────────────────────────────────────────────────
 
 essay_types = get_essay_types()
+
+selected_model = st.selectbox(
+    "🤖 Modelo de IA",
+    options=["Llama 3.3 70B (Groq)", "Gemini 3 Flash (Google)"],
+    disabled=st.session_state.running
+)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -131,7 +125,20 @@ if st.button(boton_label, type="primary", disabled=not ready or st.session_state
     # ── Inicializar corrector (lee PDFs del disco) ────────────────────────────
     with st.spinner("Cargando rúbrica y ejemplo de corrección…"):
         try:
-            corrector = CambridgeCorrector(selected_type)
+            # 1. Determinamos proveedor y clave según lo elegido en la web
+            if "Gemini" in selected_model:
+                p_provider = "gemini"
+                p_key = st.secrets["GEMINI_API_KEY"]
+            else:
+                p_provider = "groq"
+                p_key = st.secrets["LLAMA_API_KEY"]
+
+            # 2. Creamos el corrector pasándole los 3 argumentos que pide el nuevo __init__
+            corrector = CambridgeCorrector(
+                essay_type=selected_type, 
+                provider=p_provider, 
+                api_key=p_key
+            )
         except Exception as e:
             st.error(f"❌ Error al cargar los archivos de referencia: {e}")
             st.session_state.running = False
@@ -142,6 +149,14 @@ if st.button(boton_label, type="primary", disabled=not ready or st.session_state
 
     # ── Zona de progreso en tiempo real ──────────────────────────────────────
     st.markdown("### Progreso")
+
+    # AÑADIDO: El botón de parada maestro
+    if st.session_state.running:
+        if st.button("Detener corrección", type="secondary"):
+            # Si el usuario hace clic, Streamlit interrumpe el script y entra aquí en el reinicio
+            st.session_state.running = False
+            st.rerun()
+
     progress_bar = st.progress(0.0)
     status_text  = st.empty()
     log_box      = st.empty()
@@ -169,10 +184,14 @@ if st.button(boton_label, type="primary", disabled=not ready or st.session_state
 
     # ── Ejecutar proceso ──────────────────────────────────────────────────────
     try:
+        def on_save(current_bytes: bytes):
+            st.session_state.result_bytes = current_bytes
+
         output_buffer, stats = process_excel(
             excel_bytes=excel_bytes,
             corrector=corrector,
             progress_callback=on_progress,
+            save_callback=on_save,
         )
         st.session_state.result_bytes = output_buffer.getvalue()
         st.session_state.result_name  = output_name
@@ -195,14 +214,22 @@ if st.session_state.result_bytes and st.session_state.stats:
     st.markdown("---")
     st.markdown("### ✅ Proceso completado")
 
-    # Métricas en columnas
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Corregidas",  stats["success"])
-    m2.metric("Omitidas",    stats["skipped"])
-    m3.metric("Con error",   len(stats["failed"]))
+    # Solo mostrar métricas si el proceso terminó limpio y devolvió stats
+    if st.session_state.stats:
+        stats = st.session_state.stats
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Corregidas",  stats["success"])
+        m2.metric("Omitidas",    stats["skipped"])
+        m3.metric("Con error",   len(stats["failed"]))
 
-    if stats["failed"]:
-        st.warning("Alumnos con error: " + ", ".join(stats["failed"]))
+        if stats["failed"]:
+            st.warning("Alumnos con error: " + ", ".join(stats["failed"]))
+    else:
+        st.warning("⚠️ El proceso se interrumpió antes de terminar, pero puedes descargar el progreso guardado hasta el momento.")
+
+    # Asegurar que output_name exista en la sesión (por si falló muy rápido)
+    if not st.session_state.result_name:
+        st.session_state.result_name = "CORRECCION_PARCIAL.xlsx"
 
     st.download_button(
         label="⬇️ Descargar Excel corregido",
@@ -210,7 +237,8 @@ if st.session_state.result_bytes and st.session_state.stats:
         file_name=st.session_state.result_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-    st.balloons()
+    if st.session_state.stats:
+        st.balloons()
 
 # ─────────────────────────────────────────────────────────────
 # PIE

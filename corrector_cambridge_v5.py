@@ -27,8 +27,9 @@ import re
 import time
 from pathlib import Path
 
-from openai import OpenAI
 import pdfplumber
+from openai import OpenAI
+from google import genai
 
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, PatternFill, Font
@@ -60,19 +61,6 @@ COL_FULL      = 11  # K — Corrección completa
 # ─────────────────────────────────────────────────────────────
 # CLIENTE API  (se puede sobreescribir desde app.py)
 # ─────────────────────────────────────────────────────────────
-
-def _make_client(api_key: str) -> OpenAI:
-    return OpenAI(api_key=api_key, base_url=LLAMA_BASE_URL)
-
-# Cliente global; app.py lo reemplaza llamando a init_client()
-_api_key = os.environ.get("LLAMA_API_KEY", "")
-client   = _make_client(_api_key) if _api_key else None
-
-
-def init_client(api_key: str):
-    """Llamar desde app.py al arrancar o cuando cambie la key."""
-    global client
-    client = _make_client(api_key)
 
 
 def get_essay_types() -> list[str]:
@@ -155,78 +143,92 @@ SYSTEM_INSTRUCTION = (
 # ─────────────────────────────────────────────────────────────
 
 class CambridgeCorrector:
-
-    def __init__(self, essay_type: str):
-        """
-        essay_type: nombre de la carpeta dentro de redacciones/ (ej: "Essay")
-        Los PDFs se leen de disco una sola vez aquí.
-        """
+    def __init__(self, essay_type: str, provider: str, api_key: str):
         self.essay_type = essay_type
+        self.provider = provider  # "groq" o "gemini"
+        self.api_key = api_key
 
+        # Lógica de carga de PDFs (reintegrada)
         example_path = REDACCIONES / essay_type / f"{essay_type}.pdf"
-
         if not RUBRIC_PATH.exists():
             raise FileNotFoundError(f"Rúbrica no encontrada: {RUBRIC_PATH}")
         if not example_path.exists():
             raise FileNotFoundError(f"Ejemplo no encontrado: {example_path}")
 
-        self.rubric_text  = extract_pdf_text(RUBRIC_PATH)
+        self.rubric_text = extract_pdf_text(RUBRIC_PATH)
         self.example_text = extract_pdf_text(example_path)
 
-        if not self.rubric_text.strip():
-            raise RuntimeError("No se pudo extraer texto de la rúbrica. ¿Es un PDF escaneado?")
-        if not self.example_text.strip():
-            raise RuntimeError("No se pudo extraer texto del ejemplo. ¿Es un PDF escaneado?")
+        if not self.rubric_text.strip() or not self.example_text.strip():
+            raise RuntimeError("No se pudo extraer texto de los PDFs de referencia.")
+        
+        if provider == "groq":
+            self._client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+        elif provider == "gemini":
+            self._gemini_client = genai.Client(api_key=api_key)
 
-    # ── Llamada a la API ──────────────────────────────────────
+    def correct_essay(self, student_name: str, essay_text: str) -> str:
+        # Enrutador: Decide qué API usar en el momento de la llamada
+        if self.provider == "gemini":
+            return self._call_gemini(essay_text, student_name)
+        elif self.provider == "groq":
+            return self._call_groq(essay_text, student_name)
+        else:
+            raise ValueError(f"Proveedor desconocido: {self.provider}")
 
-    def _call_api(self, essay_text: str, student_name: str, retries: int = 3) -> str:
-        """Siempre devuelve str o lanza RuntimeError. Nunca devuelve None."""
-        if client is None:
-            raise RuntimeError("API no inicializada. Llama a init_client(api_key) primero.")
+    def _call_groq(self, essay_text: str, student_name: str, retries: int = 3) -> str:
+        from openai import OpenAI
+        client = self._client
+        user_message = self._build_prompt(essay_text, student_name)
+        
+        last_error = None
+        for attempt in range(retries):
+            try:
+                response = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {"role": "system", "content": SYSTEM_INSTRUCTION},
+                        {"role": "user", "content": user_message},
+                    ],
+                    temperature=0.1
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                last_error = e
+                time.sleep(10 * (attempt + 1)) # Espera 10s, luego 20s, etc.
+                
+        raise RuntimeError(f"Groq API falló tras {retries} intentos. Error: {last_error}")
 
-        user_message = (
+    def _call_gemini(self, essay_text: str, student_name: str, retries: int = 3) -> str:
+        client = self._gemini_client
+        full_prompt = f"{SYSTEM_INSTRUCTION}\n\n{self._build_prompt(essay_text, student_name)}"
+        
+        last_error = None
+        for attempt in range(retries):
+            try:
+                response = client.models.generate_content(
+                    model='gemini-3.0-flash-preview',
+                    config=genai.types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        temperature=0.1
+                    ),
+                    contents=self._build_prompt(essay_text, student_name)
+                )
+
+                return response.text.strip()
+            except Exception as e:
+                last_error = e
+                time.sleep(10 * (attempt + 1))
+                
+        raise RuntimeError(f"Gemini API falló tras {retries} intentos. Error: {last_error}")
+
+    def _build_prompt(self, essay_text: str, student_name: str) -> str:
+        return (
             f"Please correct the following student essay for the '{self.essay_type}' task.\n\n"
             f"=== OFFICIAL RUBRIC ===\n{self.rubric_text}\n\n"
             f"=== CORRECTION EXAMPLE ===\n{self.example_text}\n\n"
             f"Student name: {student_name}\n\n"
             f"STUDENT ESSAY:\n\"\"\"\n{essay_text}\n\"\"\""
         )
-
-        last_error = None
-        for attempt in range(retries):
-            try:
-                response = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_INSTRUCTION},
-                        {"role": "user",   "content": user_message},
-                    ],
-                    temperature=0.1,
-                    top_p=1.0,
-                )
-                text = response.choices[0].message.content
-                if not text or not text.strip():
-                    raise ValueError("La API devolvió una respuesta vacía.")
-                return text.strip()
-
-            except Exception as e:
-                last_error = e
-                err = str(e).lower()
-                if "quota" in err or "rate" in err or "429" in err or "resource_exhausted" in err:
-                    wait = 60 * (attempt + 1)
-                    print(f"    Rate limit. Esperando {wait}s...")
-                    time.sleep(wait)
-                elif attempt < retries - 1:
-                    print(f"    Error API (intento {attempt+1}): {e}. Reintentando en 10s...")
-                    time.sleep(10)
-                else:
-                    break
-
-        raise RuntimeError(f"API falló tras {retries} intentos: {last_error}")
-
-    def correct_essay(self, student_name: str, essay_text: str) -> str:
-        return self._call_api(essay_text, student_name)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -414,6 +416,7 @@ def process_excel(
     excel_bytes: bytes,
     corrector: CambridgeCorrector,
     progress_callback=None,
+    save_callback=None,
 ) -> tuple[io.BytesIO, dict]:
     """
     Parámetros
@@ -468,6 +471,11 @@ def process_excel(
             full_text = corrector.correct_essay(student_name, essay_text)
             score     = write_row(ws, row_num, full_text)
             success  += 1
+            if save_callback:
+                checkpoint = io.BytesIO()
+                wb.save(checkpoint)
+                checkpoint.seek(0)
+                save_callback(checkpoint.getvalue())
             if progress_callback:
                 progress_callback(idx, total, student_name, f"done:{score}")
         except Exception as e:
