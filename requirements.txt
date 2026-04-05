@@ -2,4 +2,4 @@ streamlit
 openai
 pdfplumber
 openpyxl
-genai
+google-genai
