@@ -206,7 +206,7 @@ class CambridgeCorrector:
         for attempt in range(retries):
             try:
                 response = client.models.generate_content(
-                    model='gemini-3.0-flash-preview',
+                    model='gemini-2.0-flash',
                     config=genai.types.GenerateContentConfig(
                         system_instruction=SYSTEM_INSTRUCTION,
                         temperature=0.1
