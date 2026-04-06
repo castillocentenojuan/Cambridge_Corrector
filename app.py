@@ -8,6 +8,8 @@ Requiere:      corrector_cambridge_v5.py en la misma carpeta
 
 import streamlit as st
 from pathlib import Path
+import uuid
+
 
 import corrector_cambridge_v5 as engine
 from corrector_cambridge_v5 import (
@@ -16,7 +18,6 @@ from corrector_cambridge_v5 import (
     get_essay_types,
 )
 
-import uuid
 
 # ─────────────────────────────────────────────────────────────
 # CONFIGURACIÓN DE PÁGINA
@@ -217,7 +218,7 @@ if st.session_state.running:
         progress_bar.progress(1.0)
         status_text.empty()
         st.rerun() # 🔄 Al terminar, recarga la página para mostrar el botón de descarga verde.
-        
+
 # ─────────────────────────────────────────────────────────────
 # RESULTADO Y DESCARGA
 # ─────────────────────────────────────────────────────────────
