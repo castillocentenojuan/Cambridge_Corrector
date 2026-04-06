@@ -114,45 +114,38 @@ if not uploaded_file and ready:
     ready = False
 
 # ─────────────────────────────────────────────────────────────
-# BOTÓN DE ACCIÓN
+# ─────────────────────────────────────────────────────────────
+# BOTONES DE ACCIÓN (Controladores)
+# ─────────────────────────────────────────────────────────────
+st.markdown("---")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    # 1. El interruptor de encendido
+    if st.button("🚀 Corregir Redacciones", type="primary", disabled=not ready or st.session_state.running):
+        st.session_state.running = True
+        st.session_state.result_bytes = None
+        st.session_state.stats = None
+        st.rerun()  # 🔄 Recarga la página para mostrar la interfaz de "En curso"
+
+with col2:
+    # 2. El interruptor de apagado de emergencia
+    if st.session_state.running:
+        if st.button("⏹️ Detener corrección", type="secondary"):
+            st.session_state.running = False
+            st.rerun()
+
+# ─────────────────────────────────────────────────────────────
+# EJECUCIÓN DEL MOTOR
 # ─────────────────────────────────────────────────────────────
 
-import tempfile, os
-
-STOP_FILE = os.path.join(tempfile.gettempdir(), f"cambridge_stop_{st.session_state.get('session_id','default')}.flag")
-
-def request_stop():
-    """Crea el archivo de señal de parada."""
-    with open(STOP_FILE, "w") as f:
-        f.write("stop")
-
-def clear_stop():
-    """Elimina el archivo de señal."""
-    if os.path.exists(STOP_FILE):
-        os.remove(STOP_FILE)
-
-def should_stop() -> bool:
-    """El bucle del motor llama a esto en cada iteración."""
-    return os.path.exists(STOP_FILE)
-
+# Si el interruptor está encendido, el motor trabaja
 if st.session_state.running:
-    if st.button("Detener corrección", type="secondary"):
-        request_stop()
-        st.info("Detención solicitada. Se completará el alumno actual y se detendrá.")
-
-st.markdown("---")
-boton_label = "⏳ Corrección en curso…" if st.session_state.running else "🚀 Corregir Redacciones"
-
-if st.button(boton_label, type="primary", disabled=not ready or st.session_state.running):
-
-    st.session_state.running      = True
-    st.session_state.result_bytes = None
-    st.session_state.stats        = None
-
-    # ── Inicializar corrector (lee PDFs del disco) ────────────────────────────
-    with st.spinner("Cargando rúbrica y ejemplo de corrección…"):
+    
+    # ── Inicializar corrector ────────────────────────────
+    with st.spinner("Cargando rúbrica y conectando con la IA…"):
         try:
-            # 1. Determinamos proveedor y clave según lo elegido en la web
             if "Gemini" in selected_model:
                 p_provider = "gemini"
                 p_key = st.secrets["GEMINI_API_KEY"]
@@ -160,14 +153,13 @@ if st.button(boton_label, type="primary", disabled=not ready or st.session_state
                 p_provider = "groq"
                 p_key = st.secrets["LLAMA_API_KEY"]
 
-            # 2. Creamos el corrector pasándole los 3 argumentos que pide el nuevo __init__
             corrector = CambridgeCorrector(
                 essay_type=selected_type, 
                 provider=p_provider, 
                 api_key=p_key
             )
         except Exception as e:
-            st.error(f"❌ Error al cargar los archivos de referencia: {e}")
+            st.error(f"❌ Error al inicializar: {e}")
             st.session_state.running = False
             st.stop()
 
@@ -187,7 +179,7 @@ if st.button(boton_label, type="primary", disabled=not ready or st.session_state
         progress_bar.progress(pct)
 
         if status == "skipped":
-            log_lines.append(f"⏭️ `{name}` — Omitido (ya corregido)")
+            log_lines.append(f"⏭️ `{name}` — Omitido")
         elif status == "correcting":
             status_text.text(f"Corrigiendo {current}/{total}: {name}…")
         elif status.startswith("done:"):
@@ -199,36 +191,33 @@ if st.button(boton_label, type="primary", disabled=not ready or st.session_state
             msg = status.split(":", 1)[1]
             log_lines.append(f"❌ `{name}` — Error: {msg}")
 
-        # Mostrar últimas 25 líneas para no saturar la pantalla
         log_box.markdown("\n".join(log_lines[-25:]))
 
-    # ── Ejecutar proceso ──────────────────────────────────────────────────────
+    # ── Llamada al proceso ───────────────────────────────────────────────────
     try:
         def on_save(current_bytes: bytes):
             st.session_state.result_bytes = current_bytes
-
-        clear_stop()
 
         output_buffer, stats = process_excel(
             excel_bytes=excel_bytes,
             corrector=corrector,
             progress_callback=on_progress,
             save_callback=on_save,
-            stop_flag=should_stop,
+            stop_flag=lambda: False # Ignoramos la lógica de la otra IA, Streamlit hará de verdugo.
         )
         st.session_state.result_bytes = output_buffer.getvalue()
         st.session_state.result_name  = output_name
         st.session_state.stats        = stats
 
     except Exception as e:
-        st.error(f"❌ Error inesperado durante el proceso: {e}")
+        st.error(f"❌ Error inesperado: {e}")
 
     finally:
         st.session_state.running = False
-        clear_stop()
         progress_bar.progress(1.0)
         status_text.empty()
-
+        st.rerun() # 🔄 Al terminar, recarga la página para mostrar el botón de descarga verde.
+        
 # ─────────────────────────────────────────────────────────────
 # RESULTADO Y DESCARGA
 # ─────────────────────────────────────────────────────────────
