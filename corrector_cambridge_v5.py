@@ -39,7 +39,7 @@ from openpyxl.styles import Alignment, PatternFill, Font
 # ─────────────────────────────────────────────────────────────
 
 MODEL_NAME          = "llama-3.3-70b-versatile"
-DELAY_BETWEEN_CALLS = 5
+DELAY_BETWEEN_CALLS = 8
 LLAMA_BASE_URL      = "https://api.groq.com/openai/v1"
 
 # Ruta base de los PDFs de referencia — relativa a este archivo
@@ -166,16 +166,16 @@ class CambridgeCorrector:
         elif provider == "gemini":
             self._gemini_client = genai.Client(api_key=api_key)
 
-    def correct_essay(self, student_name: str, essay_text: str) -> str:
+    def correct_essay(self, student_name: str, essay_text: str, log_callback=None) -> str:
         # Enrutador: Decide qué API usar en el momento de la llamada
         if self.provider == "gemini":
-            return self._call_gemini(essay_text, student_name)
+            return self._call_gemini(essay_text, student_name, log_callback=log_callback)
         elif self.provider == "groq":
-            return self._call_groq(essay_text, student_name)
+            return self._call_groq(essay_text, student_name, log_callback=log_callback)
         else:
             raise ValueError(f"Proveedor desconocido: {self.provider}")
 
-    def _call_groq(self, essay_text: str, student_name: str, retries: int = 3) -> str:
+    def _call_groq(self, essay_text: str, student_name: str, retries: int = 3, log_callback=None) -> str:
         from openai import OpenAI
         client = self._client
         user_message = self._build_prompt(essay_text, student_name)
@@ -194,11 +194,22 @@ class CambridgeCorrector:
                 return response.choices[0].message.content.strip()
             except Exception as e:
                 last_error = e
-                time.sleep(10 * (attempt + 1)) # Espera 10s, luego 20s, etc.
+                err = str(e).lower()
+                if "rate" in err or "429" in err or "quota" in err:
+                    wait = 60 * (attempt + 1)
+                    if log_callback:
+                        log_callback(f"error:Rate limit. Esperando {wait}s...")
+                    time.sleep(wait)
+                elif attempt < retries - 1:
+                    if log_callback:
+                        log_callback(f"error:Fallo de red. Reintentando en 10s...")
+                    time.sleep(10)
+                else:
+                    break
                 
         raise RuntimeError(f"Groq API falló tras {retries} intentos. Error: {last_error}")
 
-    def _call_gemini(self, essay_text: str, student_name: str, retries: int = 3) -> str:
+    def _call_gemini(self, essay_text: str, student_name: str, retries: int = 3, log_callback=None) -> str:
         client = self._gemini_client
         full_prompt = f"{SYSTEM_INSTRUCTION}\n\n{self._build_prompt(essay_text, student_name)}"
         
@@ -217,7 +228,19 @@ class CambridgeCorrector:
                 return response.text.strip()
             except Exception as e:
                 last_error = e
-                time.sleep(10 * (attempt + 1))
+                err = str(e).lower()
+
+                if "429" in err or "quota" in err or "exhausted" in err:
+                    wait = 60 * (attempt + 1)
+                    if log_callback:
+                        log_callback(f"error:Rate limit de Google. Esperando {wait}s...")
+                    time.sleep(wait)
+                elif attempt < retries - 1:
+                    if log_callback:
+                        log_callback(f"error:Fallo de red Google. Reintentando en 10s...")
+                    time.sleep(10)
+                else:
+                    break
                 
         raise RuntimeError(f"Gemini API falló tras {retries} intentos. Error: {last_error}")
 
@@ -417,6 +440,7 @@ def process_excel(
     corrector: CambridgeCorrector,
     progress_callback=None,
     save_callback=None,
+    stop_flag=None
 ) -> tuple[io.BytesIO, dict]:
     """
     Parámetros
@@ -451,6 +475,13 @@ def process_excel(
     failed  = []
 
     for idx, (row_num, name_cell, essay_cell, full_cell) in enumerate(data_rows, start=1):
+
+        # ── Comprobar señal de parada ─────────────────────────────
+        if stop_flag and stop_flag():
+            if progress_callback:
+                progress_callback(idx, total, "-","stopped")
+            break
+    
         student_name = str(name_cell.value).strip() if name_cell.value else f"Alumno_fila{row_num}"
         essay_text   = str(essay_cell.value).strip()
 
@@ -467,8 +498,13 @@ def process_excel(
         # ── Corregir ──────────────────────────────────────────────────────────
         if progress_callback:
             progress_callback(idx, total, student_name, "correcting")
+
+        def log_api(msg):
+            if progress_callback:
+                progress_callback(idx, total, student_name, msg)
+
         try:
-            full_text = corrector.correct_essay(student_name, essay_text)
+            full_text = corrector.correct_essay(student_name, essay_text, log_callback=log_api)
             score     = write_row(ws, row_num, full_text)
             success  += 1
             if save_callback:

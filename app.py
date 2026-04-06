@@ -16,6 +16,8 @@ from corrector_cambridge_v5 import (
     get_essay_types,
 )
 
+import uuid
+
 # ─────────────────────────────────────────────────────────────
 # CONFIGURACIÓN DE PÁGINA
 # ─────────────────────────────────────────────────────────────
@@ -58,6 +60,8 @@ if "running"       not in st.session_state: st.session_state.running       = Fal
 if "result_bytes"  not in st.session_state: st.session_state.result_bytes  = None
 if "result_name"   not in st.session_state: st.session_state.result_name   = ""
 if "stats"         not in st.session_state: st.session_state.stats         = None
+if "session_id" not in st.session_state:
+    st.session_state.session_id = uuid.uuid4().hex
 
 # ─────────────────────────────────────────────────────────────
 # CABECERA
@@ -75,7 +79,7 @@ essay_types = get_essay_types()
 
 selected_model = st.selectbox(
     "🤖 Modelo de IA",
-    options=["Llama 3.3 70B (Groq)", "Gemini 3 Flash (Google)"],
+    options=["Llama 3.3 70B (Groq)", "Gemini 2.0 Flash (Google)"],
     disabled=st.session_state.running
 )
 
@@ -112,6 +116,29 @@ if not uploaded_file and ready:
 # ─────────────────────────────────────────────────────────────
 # BOTÓN DE ACCIÓN
 # ─────────────────────────────────────────────────────────────
+
+import tempfile, os
+
+STOP_FILE = os.path.join(tempfile.gettempdir(), f"cambridge_stop_{st.session_state.get('session_id','default')}.flag")
+
+def request_stop():
+    """Crea el archivo de señal de parada."""
+    with open(STOP_FILE, "w") as f:
+        f.write("stop")
+
+def clear_stop():
+    """Elimina el archivo de señal."""
+    if os.path.exists(STOP_FILE):
+        os.remove(STOP_FILE)
+
+def should_stop() -> bool:
+    """El bucle del motor llama a esto en cada iteración."""
+    return os.path.exists(STOP_FILE)
+
+if st.session_state.running:
+    if st.button("Detener corrección", type="secondary"):
+        request_stop()
+        st.info("Detención solicitada. Se completará el alumno actual y se detendrá.")
 
 st.markdown("---")
 boton_label = "⏳ Corrección en curso…" if st.session_state.running else "🚀 Corregir Redacciones"
@@ -150,13 +177,6 @@ if st.button(boton_label, type="primary", disabled=not ready or st.session_state
     # ── Zona de progreso en tiempo real ──────────────────────────────────────
     st.markdown("### Progreso")
 
-    # AÑADIDO: El botón de parada maestro
-    if st.session_state.running:
-        if st.button("Detener corrección", type="secondary"):
-            # Si el usuario hace clic, Streamlit interrumpe el script y entra aquí en el reinicio
-            st.session_state.running = False
-            st.rerun()
-
     progress_bar = st.progress(0.0)
     status_text  = st.empty()
     log_box      = st.empty()
@@ -187,11 +207,14 @@ if st.button(boton_label, type="primary", disabled=not ready or st.session_state
         def on_save(current_bytes: bytes):
             st.session_state.result_bytes = current_bytes
 
+        clear_stop()
+
         output_buffer, stats = process_excel(
             excel_bytes=excel_bytes,
             corrector=corrector,
             progress_callback=on_progress,
             save_callback=on_save,
+            stop_flag=should_stop,
         )
         st.session_state.result_bytes = output_buffer.getvalue()
         st.session_state.result_name  = output_name
@@ -202,6 +225,7 @@ if st.button(boton_label, type="primary", disabled=not ready or st.session_state
 
     finally:
         st.session_state.running = False
+        clear_stop()
         progress_bar.progress(1.0)
         status_text.empty()
 
